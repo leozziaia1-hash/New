@@ -71,36 +71,38 @@ export class CinematicPostEffect {
         // Night Broadcast 5600K Xenon Halation & Horizontal Anamorphic Flare
         float nightStreak = 0.0;
         if (uIsNight > 0.5) {
-          // Primary broadcast lens horizontal anamorphic streak at floodlight horizon
-          float h1 = exp(-pow((uv.y - 0.56) * 44.0, 2.0));
-          // Secondary subtle optical reflection streak
-          float h2 = exp(-pow((uv.y - 0.42) * 58.0, 2.0)) * 0.45;
-          // Soft floodlight corona glow in upper atmosphere
-          float skyBloom = smoothstep(0.40, 0.85, uv.y) * 0.032 * (1.0 + uSpeedFactor * 0.4);
+          // Primary broadcast anamorphic horizontal flare at floodlight horizon
+          float h1 = exp(-pow((uv.y - 0.54) * 36.0, 2.0));
+          // Secondary subtle optical flare streak at high aperture
+          float h2 = exp(-pow((uv.y - 0.44) * 48.0, 2.0)) * 0.40;
+          // Soft 5600K floodlight corona glow in upper atmosphere
+          float skyBloom = smoothstep(0.42, 0.88, uv.y) * 0.045 * (1.0 + uSpeedFactor * 0.45);
 
-          float combinedFlare = (h1 + h2) * (0.028 + uSpeedFactor * 0.026);
+          float combinedFlare = (h1 + h2) * (0.042 + uSpeedFactor * 0.038);
           nightStreak = combinedFlare + skyBloom;
         }
 
         // Vignette intensity in night races has crisp optical focus towards center
-        float activeVignette = uIsNight > 0.5 ? vignetteFactor * 1.25 : vignetteFactor;
+        float activeVignette = uIsNight > 0.5 ? vignetteFactor * 1.35 : vignetteFactor;
         float baseAlpha = activeVignette + veilingGlare + streak + nightStreak;
+        
+        // Continuous physical CMOS sensor micro-grain (eliminates 8-bit banding on dark skies & asphalt)
         float noise = 0.0;
-        if (baseAlpha > 0.002) {
+        if (baseAlpha > 0.001 || uIsNight > 0.5) {
           vec2 ditherCoord = gl_FragCoord.xy + vec2(fract(uTime * 17.13) * 64.0);
           float dither = fract(sin(dot(ditherCoord, vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
-          noise = dither * (uIsNight > 0.5 ? uGrainIntensity * 1.5 : uGrainIntensity);
+          noise = dither * (uIsNight > 0.5 ? uGrainIntensity * 1.8 : uGrainIntensity);
         }
 
         // 5. Total composite optical alpha
-        float alpha = clamp(baseAlpha + noise, 0.0, 0.38);
+        float alpha = clamp(baseAlpha + noise, 0.0, 0.42);
 
         // Tint: Vignette corners are pure neutral black; solar glare is delicate warm gold in high sky; night is 5600K xenon ice-blue/sapphire
         vec3 neutralBlack = vec3(0.0, 0.0, 0.0);
         vec3 solarGlint = vec3(0.085, 0.055, 0.022);
-        vec3 nightGlint = vec3(0.025, 0.058, 0.115); // Pure 5600K cold xenon night halation
+        vec3 nightGlint = vec3(0.035, 0.078, 0.145); // Pure 5600K calibrated xenon night halation
         float solarWeight = clamp((veilingGlare + streak) * 2.5, 0.0, 1.0);
-        float nightWeight = clamp(nightStreak * 5.0, 0.0, 1.0);
+        float nightWeight = clamp(nightStreak * 4.5, 0.0, 1.0);
 
         vec3 tint = uIsNight > 0.5
           ? mix(neutralBlack, nightGlint, nightWeight)

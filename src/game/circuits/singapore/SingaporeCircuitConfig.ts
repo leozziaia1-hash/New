@@ -22,10 +22,10 @@ export const SingaporeCircuitConfig: ICircuitDefinition = {
   drsZones: [],
   waypoints: SINGAPORE_WAYPOINTS,
   pitZone: {
-    minX: 700.0,
-    maxX: 735.0,
-    minZ: -180.0,
-    maxZ: 80.0,
+    minX: 697.0,
+    maxX: 728.0,
+    minZ: -185.0,
+    maxZ: 25.0,
   },
   gridSlots: {
     player: {

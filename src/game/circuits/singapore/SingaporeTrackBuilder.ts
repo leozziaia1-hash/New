@@ -30,12 +30,12 @@ export class SingaporeTrackBuilder implements ITrackWorld {
   public readonly trackWidth = 14.0;
   public readonly halfWidth = 7.0;
 
-  // Pit Stop Area Bounds along canonical main straight (X ≈ 700 to 735, Z from -180 to 80)
+  // Pit Stop Area Bounds along canonical main straight (X ≈ 698 to 726, Z from -180 to 20)
   public readonly pitZone = {
-    minX: 700.0,
-    maxX: 735.0,
-    minZ: -180.0,
-    maxZ: 80.0,
+    minX: 697.0,
+    maxX: 728.0,
+    minZ: -185.0,
+    maxZ: 25.0,
   };
 
   // Materials
@@ -420,55 +420,166 @@ export class SingaporeTrackBuilder implements ITrackWorld {
     const halfW = this.halfWidth;
     const kerbW = 1.35;
 
-    const blueGeos: THREE.BufferGeometry[] = [];
-    const whiteGeos: THREE.BufferGeometry[] = [];
-
+    // 1. Analyze curvature along the closed track spline
+    const curvatures: number[] = new Array(numPts);
     for (let i = 0; i < numPts; i++) {
       const p = pts[i];
       const prevP = pts[(i - 1 + numPts) % numPts];
       const nextP = pts[(i + 1) % numPts];
-
       const dx1 = p.x - prevP.x;
       const dz1 = p.z - prevP.z;
       const dx2 = nextP.x - p.x;
       const dz2 = nextP.z - p.z;
+      curvatures[i] = dx1 * dz2 - dz1 * dx2;
+    }
 
-      const cross = dx1 * dz2 - dz1 * dx2;
-      // If curved section: place kerb on inside of corner
-      if (Math.abs(cross) > 1.2) {
-        const side = cross > 0 ? 1 : -1;
-        const dx = nextP.x - prevP.x;
-        const dz = nextP.z - prevP.z;
-        const len = Math.hypot(dx, dz) || 1;
-        const normX = -dz / len;
-        const normZ = dx / len;
+    // 2. Identify active curved zones and expand by 2 waypoints for smooth entry and exit transitions
+    const active = curvatures.map((c) => Math.abs(c) > 0.85);
+    const expanded = new Array(numPts).fill(false);
+    for (let i = 0; i < numPts; i++) {
+      if (
+        active[i] ||
+        active[(i - 1 + numPts) % numPts] ||
+        active[(i + 1) % numPts] ||
+        active[(i - 2 + numPts) % numPts] ||
+        active[(i + 2) % numPts]
+      ) {
+        expanded[i] = true;
+      }
+    }
 
-        const kPos = new THREE.Vector3(
-          p.x + normX * (halfW + kerbW * 0.5) * side,
-          0.045,
-          p.z + normZ * (halfW + kerbW * 0.5) * side
-        );
+    // 3. Extract continuous runs of consecutive curved waypoints
+    const runs: number[][] = [];
+    let currentRun: number[] = [];
+    for (let i = 0; i < numPts; i++) {
+      if (expanded[i]) {
+        currentRun.push(i);
+      } else {
+        if (currentRun.length >= 3) {
+          runs.push(currentRun);
+        }
+        currentRun = [];
+      }
+    }
+    if (currentRun.length >= 3) {
+      runs.push(currentRun);
+    }
 
-        const yaw = Math.atan2(dx, dz);
-        const kGeo = new THREE.BoxGeometry(kerbW, 0.08, len * 1.05);
-        kGeo.rotateY(yaw);
-        kGeo.translate(kPos.x, kPos.y, kPos.z);
+    const blueVerts: number[] = [];
+    const blueIndices: number[] = [];
+    const whiteVerts: number[] = [];
+    const whiteIndices: number[] = [];
 
-        if (Math.floor(i / 2) % 2 === 0) {
-          blueGeos.push(kGeo);
+    const addQuad = (
+      p1a: THREE.Vector3,
+      p2a: THREE.Vector3,
+      p1b: THREE.Vector3,
+      p2b: THREE.Vector3,
+      isBlue: boolean
+    ) => {
+      const targetVerts = isBlue ? blueVerts : whiteVerts;
+      const targetIndices = isBlue ? blueIndices : whiteIndices;
+      const baseIdx = targetVerts.length / 3;
+
+      targetVerts.push(
+        p1a.x, p1a.y, p1a.z,
+        p2a.x, p2a.y, p2a.z,
+        p1b.x, p1b.y, p1b.z,
+        p2b.x, p2b.y, p2b.z
+      );
+
+      // CCW upward normal quad
+      targetIndices.push(baseIdx, baseIdx + 1, baseIdx + 2);
+      targetIndices.push(baseIdx + 1, baseIdx + 3, baseIdx + 2);
+    };
+
+    // 4. Extrude continuous, beveled 3D kerb ribbons with smooth height transitions
+    for (const run of runs) {
+      const runLen = run.length;
+      // Determine turn direction from average cross product: > 0 means left turn (side = -1 for inside apex), < 0 means right turn (side = 1)
+      let avgCross = 0;
+      for (const idx of run) avgCross += curvatures[idx];
+      const side = avgCross > 0 ? -1 : 1;
+
+      for (let s = 0; s < runLen - 1; s++) {
+        const i1 = run[s];
+        const i2 = run[s + 1];
+
+        const p1 = pts[i1];
+        const p2 = pts[i2];
+
+        // Smooth taper at entry and exit
+        const taper1 = Math.min(1.0, (s + 0.5) / 2.5, (runLen - 1 - s) / 2.5);
+        const taper2 = Math.min(1.0, (s + 1.5) / 2.5, (runLen - 2 - s) / 2.5);
+
+        // Track normals at vertex i1
+        const prev1 = pts[(i1 - 1 + numPts) % numPts];
+        const next1 = pts[(i1 + 1) % numPts];
+        const dx1 = next1.x - prev1.x;
+        const dz1 = next1.z - prev1.z;
+        const l1 = Math.hypot(dx1, dz1) || 1;
+        const norm1X = -dz1 / l1;
+        const norm1Z = dx1 / l1;
+
+        // Track normals at vertex i2
+        const prev2 = pts[(i2 - 1 + numPts) % numPts];
+        const next2 = pts[(i2 + 1) % numPts];
+        const dx2 = next2.x - prev2.x;
+        const dz2 = next2.z - prev2.z;
+        const l2 = Math.hypot(dx2, dz2) || 1;
+        const norm2X = -dz2 / l2;
+        const norm2Z = dx2 / l2;
+
+        const y0_1 = 0.025;
+        const y1_1 = 0.025 + 0.055 * taper1;
+        const y2_1 = 0.025 + 0.012 * taper1;
+
+        const y0_2 = 0.025;
+        const y1_2 = 0.025 + 0.055 * taper2;
+        const y2_2 = 0.025 + 0.012 * taper2;
+
+        // r0: asphalt road lip, r1: elevated beveled crown, r2: outer verge
+        const p1_r0 = new THREE.Vector3(p1.x + norm1X * halfW * side, y0_1, p1.z + norm1Z * halfW * side);
+        const p2_r0 = new THREE.Vector3(p2.x + norm2X * halfW * side, y0_2, p2.z + norm2Z * halfW * side);
+
+        const p1_r1 = new THREE.Vector3(p1.x + norm1X * (halfW + kerbW * 0.55) * side, y1_1, p1.z + norm1Z * (halfW + kerbW * 0.55) * side);
+        const p2_r1 = new THREE.Vector3(p2.x + norm2X * (halfW + kerbW * 0.55) * side, y1_2, p2.z + norm2Z * (halfW + kerbW * 0.55) * side);
+
+        const p1_r2 = new THREE.Vector3(p1.x + norm1X * (halfW + kerbW) * side, y2_1, p1.z + norm1Z * (halfW + kerbW) * side);
+        const p2_r2 = new THREE.Vector3(p2.x + norm2X * (halfW + kerbW) * side, y2_2, p2.z + norm2Z * (halfW + kerbW) * side);
+
+        const isBlue = Math.floor(s / 2) % 2 === 0;
+
+        if (side === 1) {
+          addQuad(p1_r0, p2_r0, p1_r1, p2_r1, isBlue);
+          addQuad(p1_r1, p2_r1, p1_r2, p2_r2, isBlue);
         } else {
-          whiteGeos.push(kGeo);
+          addQuad(p2_r0, p1_r0, p2_r1, p1_r1, isBlue);
+          addQuad(p2_r1, p1_r1, p2_r2, p1_r2, isBlue);
         }
       }
     }
 
-    if (blueGeos.length > 0) {
-      const mergedBlue = safeMergeAndDispose(blueGeos);
-      if (mergedBlue) this.group.add(new THREE.Mesh(mergedBlue, this.kerbBlueMat));
+    if (blueVerts.length > 0) {
+      const blueGeo = new THREE.BufferGeometry();
+      blueGeo.setAttribute('position', new THREE.Float32BufferAttribute(blueVerts, 3));
+      blueGeo.setIndex(blueIndices);
+      blueGeo.computeVertexNormals();
+      const blueMesh = new THREE.Mesh(blueGeo, this.kerbBlueMat);
+      blueMesh.receiveShadow = true;
+      blueMesh.renderOrder = 2;
+      this.group.add(blueMesh);
     }
-    if (whiteGeos.length > 0) {
-      const mergedWhite = safeMergeAndDispose(whiteGeos);
-      if (mergedWhite) this.group.add(new THREE.Mesh(mergedWhite, this.kerbWhiteMat));
+
+    if (whiteVerts.length > 0) {
+      const whiteGeo = new THREE.BufferGeometry();
+      whiteGeo.setAttribute('position', new THREE.Float32BufferAttribute(whiteVerts, 3));
+      whiteGeo.setIndex(whiteIndices);
+      whiteGeo.computeVertexNormals();
+      const whiteMesh = new THREE.Mesh(whiteGeo, this.kerbWhiteMat);
+      whiteMesh.receiveShadow = true;
+      whiteMesh.renderOrder = 2;
+      this.group.add(whiteMesh);
     }
   }
 
@@ -569,19 +680,20 @@ export class SingaporeTrackBuilder implements ITrackWorld {
   private buildPitLaneAndGarages(): void {
     const pitGroup = new THREE.Group();
     // Located parallel to the pit straight, safely to the east (+X) of the road
-    // Road center is at X ≈ 688, Z from -200 to +60
-    pitGroup.position.set(708, 0, -100);
+    // Road center is at X ≈ 688, Z from -200 to +60. Road right edge is at X ≈ 695 to 716.
+    // Setting pitGroup origin to X: 696.5, Z: -108.0 with rotation -2.996 places the pit wall exactly along the outer track limit (offset +8.5m)
+    pitGroup.position.set(696.5, 0, -108.0);
     pitGroup.rotation.y = -2.996;
 
-    // Pit building (team garages + VIP hospitality suite)
+    // Pit building (team garages + VIP hospitality suite) placed further into the pit paddock (local x = 20)
     const buildingGeo = new THREE.BoxGeometry(180, 10.5, 18);
     const building = new THREE.Mesh(buildingGeo, this.mbsBuildingMat);
-    building.position.set(16, 5.25, 0);
+    building.position.set(20, 5.25, 0);
     pitGroup.add(building);
 
     const glassGeo = new THREE.BoxGeometry(176, 3.8, 17.6);
     const glass = new THREE.Mesh(glassGeo, this.mbsGlassMat);
-    glass.position.set(16, 7.8, 0);
+    glass.position.set(20, 7.8, 0);
     pitGroup.add(glass);
 
     // Garage bay illuminated lighting
@@ -590,11 +702,11 @@ export class SingaporeTrackBuilder implements ITrackWorld {
       const bayZ = -75 + g * 13.5;
       const bayLightGeo = new THREE.BoxGeometry(12, 0.3, 9.5);
       const bayLight = new THREE.Mesh(bayLightGeo, this.floodlightHeadMat);
-      bayLight.position.set(12, 4.4, bayZ);
+      bayLight.position.set(16, 4.4, bayZ);
       pitGroup.add(bayLight);
     }
 
-    // Pit wall separating pit lane from main straight
+    // Pit wall separating pit lane from main straight (local x = 0 is 8.5m from road centerline)
     const pitWallGeo = new THREE.BoxGeometry(1.0, 1.3, 160);
     const pitWall = new THREE.Mesh(pitWallGeo, this.concreteBarrierMat);
     pitWall.position.set(0, 0.65, 0);
@@ -747,14 +859,14 @@ export class SingaporeTrackBuilder implements ITrackWorld {
 
   private buildAndersonBridgeStructure(): void {
     const bridgeGroup = new THREE.Group();
-    // Turn 12 (-626.0, 308.4) to Turn 13 (-462.5, 459.7)
-    // Center of bridge approach along the Singapore River mouth
-    bridgeGroup.position.set(-544, 0, 384);
-    bridgeGroup.rotation.y = 0.75;
+    // Turn 12 (-626.0, 308.4) through Singapore River Crossing to Turn 13 (-462.5, 459.7)
+    // Canonical center of Anderson Bridge at WP 372: (-548.8, 383.1), with track heading 0.838 rad
+    bridgeGroup.position.set(-548.8, 0, 383.1);
+    bridgeGroup.rotation.y = 0.838;
 
-    const spanLength = 85.0;
-    const bridgeWidth = 17.5; // Wider than the 14m road, ensuring arches are safely outside
-    const archHeight = 11.5;
+    const spanLength = 90.0;
+    const bridgeWidth = 22.0; // 22m span width gives arches +/- 11.0m clearance from track center, safely outside 8.2m walls!
+    const archHeight = 12.0;
 
     for (const side of [-bridgeWidth * 0.5, bridgeWidth * 0.5]) {
       const archCurve = new THREE.CatmullRomCurve3([
@@ -1005,19 +1117,19 @@ export class SingaporeTrackBuilder implements ITrackWorld {
   }
 
   private buildBrakingDistanceBoards(): void {
-    // Braking distance boards placed safely behind catch barriers before major braking zones
+    // Braking distance boards placed strictly behind catch barriers (> 10.5m from centerline)
     const boards = [
-      // Turn 1 Braking (Sheares)
-      { x: 670, z: -320, text: '150', rot: -2.99 },
-      { x: 662, z: -360, text: '100', rot: -2.99 },
-      { x: 650, z: -390, text: '50', rot: -2.99 },
-      // Turn 7 Braking (Memorial Corner)
-      { x: -140, z: -210, text: '150', rot: -2.1 },
-      { x: -180, z: -230, text: '100', rot: -2.1 },
-      { x: -215, z: -248, text: '50', rot: -2.1 },
-      // Turn 14 Braking (Raffles Avenue)
-      { x: -380, z: 80, text: '100', rot: -1.0 },
-      { x: -368, z: 30, text: '50', rot: -1.0 },
+      // Turn 1 Braking (Sheares approach, outside right)
+      { x: 674.2, z: -274.7, text: '150', rot: -3.00 },
+      { x: 667.6, z: -319.7, text: '100', rot: -3.00 },
+      { x: 660.0, z: -372.2, text: '50', rot: -3.00 },
+      // Turn 7 Braking (Memorial Corner, outside right)
+      { x: -90.6, z: -193.2, text: '150', rot: -2.08 },
+      { x: -137.0, z: -218.8, text: '100', rot: -2.08 },
+      { x: -176.8, z: -240.8, text: '50', rot: -2.08 },
+      // Turn 14 Braking (Raffles Avenue, outside left)
+      { x: -409.7, z: 114.7, text: '100', rot: 2.86 },
+      { x: -395.4, z: 70.7, text: '50', rot: 2.79 },
     ];
 
     boards.forEach((b) => {
